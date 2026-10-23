@@ -174,8 +174,8 @@ quest_kgsl_gpuobj_alloc(struct tu_device *dev, uint64_t size,
       .name = tu_debug_bos_add(dev, req.mmapsize, name),
       .refcnt = 1,
       .shared_fd = -1,
-      .base = base,
       .quest_gpuobj = used_gpuobj,
+      .base = base,
    };
 '''
     if source.count(init_before) != 1:

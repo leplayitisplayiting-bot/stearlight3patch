@@ -228,6 +228,68 @@ kgsl_sparse_vma_init(struct tu_device *dev,'''
         raise SystemExit("Unsupported Mesa source: bo map block not found")
     source = source.replace(map_before, map_after)
 
+    # Capability probes (HOST_CACHED coherent memory, USE_CPU_MAP) allocated a
+    # throws-away page through IOCTL_KGSL_GPUMEM_ALLOC_ID. Horizon KGSL denies
+    # GPUMEM to untrusted apps (EACCES), so Turnip concluded cached memory was
+    # unsupported and SteamVR's compositor failed with "Failed to determine a
+    # compatible memory type". Probe through GPUOBJ_ALLOC instead: it works
+    # under the same app sandbox and echoes the accepted flags like GPUMEM.
+    probe_before = '''   int ret = safe_ioctl(fd, IOCTL_KGSL_GPUMEM_ALLOC_ID, &req_alloc);
+   if (ret) {
+      return false;
+   }
+
+   /* The kernel echoes back the *actual* flags it used. Some KGSL
+    * versions silently strip unsupported flags (e.g. IOCOHERENT on
+    * GPUs that lack IO-coherence) instead of failing the ioctl.
+    * Detect this by checking the requested bits are still present.
+    */
+   bool supported = (req_alloc.flags & flags) == flags;
+
+   struct kgsl_gpumem_free_id req_free = { .id = req_alloc.id };
+
+   safe_ioctl(fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req_free);
+
+   return supported;
+'''
+    probe_after = '''   int ret = safe_ioctl(fd, IOCTL_KGSL_GPUMEM_ALLOC_ID, &req_alloc);
+   struct kgsl_gpuobj_alloc req_probe = {
+      .size = req_alloc.size,
+      .flags = req_alloc.flags,
+   };
+   bool probe_gpuobj = false;
+   if (ret) {
+      ret = safe_ioctl(fd, IOCTL_KGSL_GPUOBJ_ALLOC, &req_probe);
+      if (ret) {
+         return false;
+      }
+      probe_gpuobj = true;
+   }
+
+   /* The kernel echoes back the *actual* flags it used. Some KGSL
+    * versions silently strip unsupported flags (e.g. IOCOHERENT on
+    * GPUs that lack IO-coherence) instead of failing the ioctl.
+    * Detect this by checking the requested bits are still present.
+    */
+   if (probe_gpuobj)
+      req_alloc.flags = req_probe.flags;
+
+   bool supported = (req_alloc.flags & flags) == flags;
+
+   if (probe_gpuobj) {
+      struct kgsl_gpuobj_free req_free = { .id = req_probe.id };
+      safe_ioctl(fd, IOCTL_KGSL_GPUOBJ_FREE, &req_free);
+   } else {
+      struct kgsl_gpumem_free_id req_free = { .id = req_alloc.id };
+      safe_ioctl(fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req_free);
+   }
+
+   return supported;
+'''
+    if source.count(probe_before) != 1:
+        raise SystemExit("Unsupported Mesa source: kgsl_is_memory_type_supported not found")
+    source = source.replace(probe_before, probe_after)
+
     target.write_text(source)
 
 # Tag GPUOBJ-allocated BOs so kgsl_bo_finish frees them with the right ioctl.
